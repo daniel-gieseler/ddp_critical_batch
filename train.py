@@ -2,8 +2,11 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.distributed as dist
+from torch.utils.data import TensorDataset, DataLoader
 from accelerate import Accelerator
+from accelerate.utils import set_seed
+from hooks.gns import GradientNoiseScaleState, gns_hook
+from hooks.default import allreduce_avg_hook
 
 class ToyModel(nn.Module):
     def __init__(self):
@@ -15,38 +18,54 @@ class ToyModel(nn.Module):
     def forward(self, x):
         return self.net2(self.relu(self.net1(x)))
 
-def allreduce_avg_hook(process_group, bucket: dist.GradBucket):
-    buf = bucket.buffer()
-    print(f"Process {dist.get_rank()}: Executing allreduce_avg_hook on bucket with {buf.numel()} elements")
-    fut = dist.all_reduce(buf, op=dist.ReduceOp.AVG, group=process_group, async_op=True).get_future()
-    output = fut.then(lambda f: f.value()[0])
-    print(f"Process {dist.get_rank()}: Output: {output}")
-    return output
+def get_dataset(sample_size):
+    x = torch.randn(sample_size, 10)
+    y = torch.randn(sample_size, 5)
+    return TensorDataset(x, y)
 
-def main():
+
+def main(comm_hook):
+    set_seed(42)
     accelerator = Accelerator()
+    LOCAL_BATCH_SIZE = 20
+    GLOBAL_BATCH_SIZE = LOCAL_BATCH_SIZE * accelerator.num_processes
+    
     model = ToyModel()
     optimizer = optim.SGD(model.parameters(), lr=1e-3)
+    dataloader = DataLoader(get_dataset(LOCAL_BATCH_SIZE), batch_size=LOCAL_BATCH_SIZE, shuffle=False)
+    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
-    # Wrap with Accelerate (adds DDP when multi-process)
-    model, optimizer = accelerator.prepare(model, optimizer)
+    if comm_hook != "none":
+        assert hasattr(model, "register_comm_hook"), "Model must be wrapped in torch.nn.parallel.DistributedDataParallel"
+        if comm_hook == "default":
+            model.register_comm_hook(state=None, hook=allreduce_avg_hook)
+        elif comm_hook == "gns":
+            gns_state = GradientNoiseScaleState()
+            model.register_comm_hook(state=gns_state, hook=gns_hook)
 
-    # Register comm hook if we’re in DDP
-    if hasattr(model, "register_comm_hook"):
-        print(f"Process {dist.get_rank()}: Registering communication hook")
-        pg = getattr(model, "process_group", dist.group.WORLD)
-        model.register_comm_hook(pg, allreduce_avg_hook)
-
-    # One synthetic step
-    x = torch.randn(20, 10, device=accelerator.device)
-    y = torch.randn(20, 5, device=accelerator.device)
-    loss = nn.MSELoss()(model(x), y)
-    accelerator.backward(loss)
-    optimizer.step()
-    optimizer.zero_grad()
+    for x, y in dataloader:
+        loss = nn.MSELoss()(model(x), y)
+        accelerator.backward(loss)
+        
+        if comm_hook == "gns":
+            gns_state.update_from_buckets(LOCAL_BATCH_SIZE, GLOBAL_BATCH_SIZE)
+        
+        # optimizer.step()
+        # optimizer.zero_grad()
+        break  # Just one batch
 
     if accelerator.is_local_main_process:
-        print(f"loss: {loss.item():.4f}")
+        print(f"loss: {loss.item():.8f}")
+        if comm_hook == "gns":
+            print(f"gradient_noise_scale: {gns_state.gradient_noise_scale}")
+    
+    accelerator.end_training()
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    parser = argparse.ArgumentParser(description="Train with different communication hooks")
+    parser.add_argument("--hook", choices=["none", "default", "gns"], default="none",
+                       help="Communication hook type: none (no hook), default (allreduce_avg), or gns (gradient noise scale)")
+    args = parser.parse_args()
+    
+    main(comm_hook=args.hook)
