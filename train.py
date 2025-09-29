@@ -40,7 +40,7 @@ def main(comm_hook):
         if comm_hook == "default":
             model.register_comm_hook(state=None, hook=allreduce_avg_hook)
         elif comm_hook == "gns":
-            gns_state = GradientNoiseScaleState()
+            gns_state = GradientNoiseScaleState(device=accelerator.device)
             model.register_comm_hook(state=gns_state, hook=gns_hook)
 
     for x, y in dataloader:
@@ -48,7 +48,7 @@ def main(comm_hook):
         accelerator.backward(loss)
         
         if comm_hook == "gns":
-            gns_state.update_from_buckets(LOCAL_BATCH_SIZE, GLOBAL_BATCH_SIZE)
+            gns_state.update(LOCAL_BATCH_SIZE, GLOBAL_BATCH_SIZE)
         
         # optimizer.step()
         # optimizer.zero_grad()
@@ -57,7 +57,7 @@ def main(comm_hook):
     if accelerator.is_local_main_process:
         print(f"loss: {loss.item():.8f}")
         if comm_hook == "gns":
-            print(f"gradient_noise_scale: {gns_state.gradient_noise_scale}")
+            print(f"gradient_noise_scale: {gns_state.gns}")
     
     accelerator.end_training()
 
