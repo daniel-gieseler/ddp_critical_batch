@@ -112,6 +112,4 @@ class GradientNoiseScaleState:
 
 # Bonus
 
-TODO: add training speed cost of using gns_hook as opposed to no hook.
-
-TODO: add a study on the paper concerns about learning rate being well-tuned
+TODO: add a study on the training speed cost of using gns_hook as opposed to no hook.
