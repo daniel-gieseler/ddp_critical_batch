@@ -109,7 +109,3 @@ class GradientNoiseScaleState:
         self.local_sq_norms.zero_()
         self.global_sq_norms.zero_()
 ```
-
-# Bonus
-
-TODO: add a study on the training speed cost of using gns_hook as opposed to no hook.
